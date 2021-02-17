@@ -156,7 +156,7 @@ class LineBasedPeer(basic.LineOnlyReceiver):
             'jsonrpc': '2.0',
             'method': method,
             'params': params,
-            'id': id,
+#            'id': id,
         })))
         self.other = Proxy(self._matcher)
     

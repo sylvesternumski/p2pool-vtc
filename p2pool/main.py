@@ -64,12 +64,16 @@ class keypool():
 
     def paytotal(self):
         self.payouttotal = 0.0
+        print("pubkeys.keys: %s" % pubkeys.keys)
         for i in range(len(pubkeys.keys)):
-            self.payouttotal += node.get_current_txouts().get(bitcoin_data.pubkey_hash_to_script2(pubkeys.keys[i]['hash'], pubkeys.keys[i]['version'], net), 0)*1e-8
+            self.payouttotal += node.get_current_txouts().get(
+                    pubkeys.keys[i]['address'], 0) * 1e-8
         return self.payouttotal
 
     def getpaytotal(self):
         return self.payouttotal
+
+gnode = None # for debugging via rconsole/rfoo only
 
 @defer.inlineCallbacks
 def main(args, net, datadir_path, merged_urls, worker_endpoint):
@@ -99,13 +103,13 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         url = '%s://%s:%i/' % ('https' if args.bitcoind_rpc_ssl else 'http', args.bitcoind_address, args.bitcoind_rpc_port)
         print '''Testing bitcoind RPC connection to '%s' with username '%s'...''' % (url, args.bitcoind_rpc_username)
         bitcoind = jsonrpc.HTTPProxy(url, dict(Authorization='Basic ' + base64.b64encode(args.bitcoind_rpc_username + ':' + args.bitcoind_rpc_password)), timeout=30)
-        yield helper.check(bitcoind, net)
+        yield helper.check(bitcoind, net, args)
         temp_work = yield helper.getwork(bitcoind)
         
         bitcoind_getinfo_var = variable.Variable(None)
         @defer.inlineCallbacks
         def poll_warnings():
-            bitcoind_getinfo_var.set((yield deferral.retry('Error while calling getnetworkinfo:')(bitcoind.rpc_getnetworkinfo)()))
+            bitcoind_getinfo_var.set((yield deferral.retry('Error while calling getinfo:')(bitcoind.rpc_getnetworkinfo)()))
         yield poll_warnings()
         deferral.RobustLoopingCall(poll_warnings).start(20*60)
         
@@ -134,25 +138,25 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                 if not res['ismine']:
                     print '    Cached address is either invalid or not controlled by local bitcoind!'
                     address = None
-            
+
             if address is None:
                 print '    Getting payout address from bitcoind...'
-                address = yield deferral.retry('Error getting payout address from bitcoind:', 5)(lambda: bitcoind.rpc_getnewaddress('p2pool', 'legacy'))()
-            
+                address = yield deferral.retry('Error getting payout address from bitcoind:', 5)(lambda: bitcoind.rpc_getaccountaddress('p2pool'))()
+
             with open(address_path, 'wb') as f:
                 f.write(address)
-            
-            my_pubkey_hash, my_pubkey_hash_version = bitcoin_data.address_to_pubkey_hash(address, net.PARENT)
-            print '    ...success! Payout address:', bitcoin_data.pubkey_hash_to_address(my_pubkey_hash, net.PARENT, my_pubkey_hash_version)
-            print
-     
-            pubkeys.addkey({'hash': my_pubkey_hash, 'version': my_pubkey_hash_version})
+
+            my_address = address
+            print('    ...success! Payout address: %s' % my_address)
+            print()
+
+            pubkeys.addkey({'address': my_address})
         elif args.address != 'dynamic':
-            my_pubkey_hash = args.pubkey_hash
-            my_pubkey_hash_version = args.pubkey_hash_version
-            print '    ...success! Payout address:', bitcoin_data.pubkey_hash_to_address(my_pubkey_hash, net.PARENT, my_pubkey_hash_version)
-            print
-            pubkeys.addkey({'hash': my_pubkey_hash, 'version': my_pubkey_hash_version})
+            my_address = args.address
+            print('    ...success! Payout address: %s' % my_address)
+            print()
+
+            pubkeys.addkey({'address': my_address})
         else:
             print '    Entering dynamic address mode.'
 
@@ -161,16 +165,14 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                 args.numaddresses = 2
             for i in range(args.numaddresses):
                 address = yield deferral.retry('Error getting a dynamic address from bitcoind:', 5)(lambda: bitcoind.rpc_getnewaddress('p2pool'))()
-                new_pubkey, pubkey_version = bitcoin_data.address_to_pubkey_hash(address, net.PARENT)
-                pubkeys.addkey({'hash': new_pubkey, 'version': pubkey_version})
+                pubkeys.addkey({'address': address})
 
             pubkeys.updatestamp(time.time())
 
-            my_pubkey_hash = pubkeys.keys[0]['hash']
-            my_pubkey_hash_version = pubkeys.keys[0]['version']
+            my_address = pubkeys.keys[0]['address']
 
             for i in range(len(pubkeys.keys)):
-                print '    ...payout %d: %s' % (i, bitcoin_data.pubkey_hash_to_address(pubkeys.keys[i]['hash'], net.PARENT, pubkeys.keys[i]['version']),)
+                print('    ...payout %d: %s' % (i, pubkeys[i]['address']))
         
         print "Loading shares..."
         shares = {}
@@ -187,7 +189,8 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         
         print 'Initializing work...'
         
-        node = p2pool_node.Node(factory, bitcoind, shares.values(), known_verified, net)
+        global gnode
+        gnode = node = p2pool_node.Node(factory, bitcoind, shares.values(), known_verified, net)
         yield node.start()
         
         for share_hash in shares:
@@ -288,14 +291,9 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         
         print 'Listening for workers on %r port %i...' % (worker_endpoint[0], worker_endpoint[1])
         
-        #wb = work.WorkerBridge(node, my_pubkey_hash, args.donation_percentage, merged_urls, args.worker_fee, args, pubkeys, bitcoind)
-        if args.address_share_rate is not None:
-            share_rate_type = 'address'
-            share_rate = args.address_share_rate
-        else:
-            share_rate_type = 'miner'
-            share_rate = args.miner_share_rate
-        wb = work.WorkerBridge(node, my_pubkey_hash, my_pubkey_hash_version, args.donation_percentage, merged_urls, args.worker_fee, args, pubkeys, bitcoind, args.min_difficulty, share_rate, share_rate_type)
+        wb = work.WorkerBridge(node, my_address, args.donation_percentage,
+                               merged_urls, args.worker_fee, args, pubkeys,
+                               bitcoind, args.share_rate)
         web_root = web.get_web_root(wb, datadir_path, bitcoind_getinfo_var, static_dir=args.web_static)
         caching_wb = worker_interface.CachingWorkerBridge(wb)
         worker_interface.WorkerInterface(caching_wb).attach_to(web_root, get_handler=lambda request: request.redirect('/static/'))
@@ -315,11 +313,11 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         print 'Started successfully!'
         print 'Go to http://127.0.0.1:%i/ to view graphs and statistics!' % (worker_endpoint[1],)
         if args.donation_percentage > 1.1:
-            print '''Donating %.1f%% of work towards Vertcoin's development. Thanks for the tip!''' % (args.donation_percentage,)
+            print '''Donating %.1f%% of work towards P2Pool's development. Thanks for the tip!''' % (args.donation_percentage,)
         elif args.donation_percentage < .9:
-            print '''Donating %.1f%% of work towards Vertcoin's development. Please donate to encourage further development of Vertcoin!''' % (args.donation_percentage,)
+            print '''Donating %.1f%% of work towards P2Pool's development. Please donate to encourage further development of P2Pool!''' % (args.donation_percentage,)
         else:
-            print '''Donating %.1f%% of work towards Vertcoin's development. Thank you!''' % (args.donation_percentage,)
+            print '''Donating %.1f%% of work towards P2Pool's development. Thank you!''' % (args.donation_percentage,)
             print 'You can increase this amount with --give-author argument! (or decrease it, if you must)'
         print
         
@@ -351,7 +349,15 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                             return
                         if share.pow_hash <= share.header['bits'].target and abs(share.timestamp - time.time()) < 10*60:
                             yield deferral.sleep(random.expovariate(1/60))
-                            message = '\x02%s BLOCK FOUND by %s! %s%064x' % (net.NAME.upper(), bitcoin_data.script2_to_address(share.new_script, net.PARENT), net.PARENT.BLOCK_EXPLORER_URL_PREFIX, share.header_hash)
+                            message = '\x02%s BLOCK FOUND by %s! %s%064x' % (
+                                    net.NAME.upper(),
+                                    bitcoin_data.script2_to_address(
+                                        share.new_script, net.ADDRESS_VERSION,
+                                        -1, net.PARENT) if
+                                            share.VERSION < 34 else
+                                                share.address,
+                                    net.PARENT.BLOCK_EXPLORER_URL_PREFIX,
+                                    share.header_hash)
                             if all('%x' % (share.header_hash,) not in old_message for old_message in self.recent_messages):
                                 self.say(self.channel, message)
                                 self._remember_message(message)
@@ -380,7 +386,7 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
             last_str = None
             last_time = 0
             while True:
-                yield deferral.sleep(3)
+                yield deferral.sleep(30)
                 try:
                     height = node.tracker.get_height(node.best_share_var.value)
                     this_str = 'P2Pool: %i shares in chain (%i verified/%i total) Peers: %i (%i incoming)' % (
@@ -409,7 +415,8 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                         paystr = ''
                         paytot = 0.0
                         for i in range(len(pubkeys.keys)):
-                            curtot = node.get_current_txouts().get(bitcoin_data.pubkey_hash_to_script2(pubkeys.keys[i]['hash'], pubkeys.keys[i]['version'], net.PARENT), 0)
+                            curtot = node.get_current_txouts().get(
+                                    pubkeys.keys[i]['address'], 0)
                             paytot += curtot*1e-8
                             paystr += "(%.4f)" % (curtot*1e-8,)
                         paystr += "=%.4f" % (paytot,)
@@ -463,6 +470,13 @@ def run():
     parser.add_argument('--debug',
         help='enable debugging mode',
         action='store_const', const=True, default=False, dest='debug')
+    parser.add_argument('--bench',
+        help='enable CPU performance profiling mode',
+        action='store_const', const=True, default=False, dest='bench')
+    parser.add_argument('--rconsole',
+        help='enable rconsole debugging mode (requires rfoo)',
+        action='store_const', const=True, default=False, dest='rconsole')
+
     parser.add_argument('-a', '--address',
         help='generate payouts to this address (default: <address requested from bitcoind>), or (dynamic)',
         type=str, action='store', default=None, dest='address')
@@ -484,9 +498,12 @@ def run():
     parser.add_argument('--merged',
         help='call getauxblock on this url to get work for merged mining (example: http://ncuser:ncpass@127.0.0.1:10332/)',
         type=str, action='append', default=[], dest='merged_urls')
+    parser.add_argument('--coinbtext',
+        help='append this text to the coinbase',
+        type=str, action='append', default=[], dest='coinb_texts')
     parser.add_argument('--give-author', metavar='DONATION_PERCENTAGE',
-        help='donate this percentage of work towards the development of p2pool (default: 1.0)',
-        type=float, action='store', default=1.0, dest='donation_percentage')
+        help='donate this percentage of work towards the development of p2pool (default: 0.0)',
+        type=float, action='store', default=0.1, dest='donation_percentage')
     parser.add_argument('--iocp',
         help='use Windows IOCP API in order to avoid errors due to large number of sockets being open',
         action='store_true', default=False, dest='iocp')
@@ -527,16 +544,9 @@ def run():
     worker_group.add_argument('-f', '--fee', metavar='FEE_PERCENTAGE',
         help='''charge workers mining to their own bitcoin address (by setting their miner's username to a bitcoin address) this percentage fee to mine on your p2pool instance. Amount displayed at http://127.0.0.1:WORKER_PORT/fee (default: 0)''',
         type=float, action='store', default=0, dest='worker_fee')
-        
-    worker_group.add_argument('--miner-share-rate', metavar='SHARES_PER_MINUTE',
-        help='number of psuedoshares per minute for each miner',
-        type=float, action='store', default=None, dest='miner_share_rate')
-    worker_group.add_argument('--address-share-rate', metavar='SHARES_PER_MINUTE',
-        help='number of psuedoshares per minute for each address',
-        type=float, action='store', default=None, dest='address_share_rate')
-    worker_group.add_argument('--min-difficulty', metavar='DIFFICULTY',
-        help='minium difficulty for miners',
-        type=float, action='store', default=1.0, dest='min_difficulty')
+    worker_group.add_argument('-s', '--share-rate', metavar='SECONDS_PER_SHARE',
+        help='Auto-adjust mining difficulty on each connection to target this many seconds per pseudoshare (default: %3.0f)' % 3.,
+        type=float, action='store', default=3., dest='share_rate')
     
     bitcoind_group = parser.add_argument_group('bitcoind interface')
     bitcoind_group.add_argument('--bitcoind-config-path', metavar='BITCOIND_CONFIG_PATH',
@@ -557,6 +567,9 @@ def run():
     bitcoind_group.add_argument(metavar='BITCOIND_RPCUSERPASS',
         help='bitcoind RPC interface username, then password, space-separated (only one being provided will cause the username to default to being empty, and none will cause P2Pool to read them from bitcoin.conf)',
         type=str, action='store', default=[], nargs='*', dest='bitcoind_rpc_userpass')
+    bitcoind_group.add_argument('--allow-obsolete-bitcoind',
+        help='allow the use of coin daemons (bitcoind) that do not support all of the required softforks for this network (e.g. Bitcoin Core and segwit2x)',
+        action='store_const', const=True, default=False, dest='allow_obsolete_bitcoind')
     
     args = parser.parse_args()
     
@@ -565,11 +578,10 @@ def run():
         defer.setDebugging(True)
     else:
         p2pool.DEBUG = False
+    p2pool.BENCH = args.bench
     
     net_name = args.net_name + ('_testnet' if args.testnet else '')
     net = networks.nets[net_name]
-    
-    args.min_difficulty /= net.PARENT.DUMB_SCRYPT_DIFF
     
     datadir_path = os.path.join((os.path.join(os.path.dirname(sys.argv[0]), 'data') if args.datadir is None else args.datadir), net_name)
     if not os.path.exists(datadir_path):
@@ -636,7 +648,8 @@ def run():
     
     if args.address is not None and args.address != 'dynamic':
         try:
-            args.pubkey_hash, args.pubkey_hash_version = bitcoin_data.address_to_pubkey_hash(args.address, net.PARENT)
+            _ = bitcoin_data.address_to_pubkey_hash(args.address, net.PARENT)
+            args.pubkey_hash = True
         except Exception, e:
             parser.error('error parsing address: ' + repr(e))
     else:
@@ -692,6 +705,9 @@ def run():
             ).addBoth(lambda x: None)
     if not args.no_bugreport:
         log.addObserver(ErrorReporter().emit)
-    
+    if args.rconsole:
+        from rfoo.utils import rconsole
+        rconsole.spawn_server()
+
     reactor.callWhenRunning(main, args, net, datadir_path, merged_urls, worker_endpoint)
     reactor.run()

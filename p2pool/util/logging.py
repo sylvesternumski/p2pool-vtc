@@ -3,6 +3,9 @@ import datetime
 import os
 import sys
 
+reload(sys)  
+sys.setdefaultencoding('utf8')
+
 from twisted.python import log
 
 class EncodeReplacerPipe(object):
