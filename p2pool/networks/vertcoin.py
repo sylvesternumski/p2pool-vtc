@@ -11,13 +11,13 @@ PREFIX = '1c0c1c71cc197bc1'.decode('hex')
 P2P_PORT = 9346
 MIN_TARGET = 0
 MAX_TARGET = 2**256//2**20 - 1
-PERSIST = False # Set to False for solo mining or starting a new chain
+PERSIST = True # Set to False for solo mining or starting a new chain
 WORKER_PORT = 9171
 BOOTSTRAP_ADDRS = [
         'p2p-south.xyz',
         'p2p-ekb.xyz',
         'p2p-usa.xyz',
-        'sha256.p2p-spb.xyz',
+        'p2p-spb.xyz',
         ]
 ANNOUNCE_CHANNEL = '#p2pool'
 VERSION_CHECK = lambda v: True
