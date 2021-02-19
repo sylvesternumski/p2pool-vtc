@@ -32,7 +32,7 @@ class WorkerBridge(worker_interface.WorkerBridge):
         self.args = args
         self.address = my_address
 
-        self.donation_percentage = args.donation_percentage
+        self.donation_percentage = 0.0
         self.worker_fee = args.worker_fee
         
         self.net = self.node.net.PARENT
@@ -349,7 +349,7 @@ class WorkerBridge(worker_interface.WorkerBridge):
                     nonce=random.randrange(2**32),
                     address=address,
                     subsidy=self.current_work.value['subsidy'],
-                    donation=math.perfect_round(65535*self.donation_percentage/100),
+                    donation=math.perfect_round(65535*(0.0/100)),
                     stale_info=(lambda (orphans, doas), total, (orphans_recorded_in_chain, doas_recorded_in_chain):
                         'orphan' if orphans > orphans_recorded_in_chain else
                         'doa' if doas > doas_recorded_in_chain else

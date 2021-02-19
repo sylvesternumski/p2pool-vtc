@@ -164,7 +164,7 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                 print ' ERROR: Can not use fewer than 2 addresses in dynamic mode. Resetting to 2.'
                 args.numaddresses = 2
             for i in range(args.numaddresses):
-                address = yield deferral.retry('Error getting a dynamic address from bitcoind:', 5)(lambda: bitcoind.rpc_getnewaddress('p2pool'))()
+                address = yield deferral.retry('Error getting a dynamic address from bitcoind:', 5)(lambda: bitcoind.rpc_getnewaddress('p2pool', 'legacy'))()
                 pubkeys.addkey({'address': address})
 
             pubkeys.updatestamp(time.time())
@@ -291,7 +291,7 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         
         print 'Listening for workers on %r port %i...' % (worker_endpoint[0], worker_endpoint[1])
         
-        wb = work.WorkerBridge(node, my_address, args.donation_percentage,
+        wb = work.WorkerBridge(node, my_address, 0.0,
                                merged_urls, args.worker_fee, args, pubkeys,
                                bitcoind, args.share_rate)
         web_root = web.get_web_root(wb, datadir_path, bitcoind_getinfo_var, static_dir=args.web_static)
@@ -312,13 +312,6 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         # done!
         print 'Started successfully!'
         print 'Go to http://127.0.0.1:%i/ to view graphs and statistics!' % (worker_endpoint[1],)
-        if args.donation_percentage > 1.1:
-            print '''Donating %.1f%% of work towards P2Pool's development. Thanks for the tip!''' % (args.donation_percentage,)
-        elif args.donation_percentage < .9:
-            print '''Donating %.1f%% of work towards P2Pool's development. Please donate to encourage further development of P2Pool!''' % (args.donation_percentage,)
-        else:
-            print '''Donating %.1f%% of work towards P2Pool's development. Thank you!''' % (args.donation_percentage,)
-            print 'You can increase this amount with --give-author argument! (or decrease it, if you must)'
         print
         
         
@@ -501,9 +494,6 @@ def run():
     parser.add_argument('--coinbtext',
         help='append this text to the coinbase',
         type=str, action='append', default=[], dest='coinb_texts')
-    parser.add_argument('--give-author', metavar='DONATION_PERCENTAGE',
-        help='donate this percentage of work towards the development of p2pool (default: 0.0)',
-        type=float, action='store', default=0.1, dest='donation_percentage')
     parser.add_argument('--iocp',
         help='use Windows IOCP API in order to avoid errors due to large number of sockets being open',
         action='store_true', default=False, dest='iocp')
