@@ -4,3 +4,6 @@
 [submodule "web-static"]
 	path = web-static
 	url = https://github.com/sylvesternumski/p2pool-ui-punchy.git
+[submodule "verthash-pospace"]
+	path = verthash-pospace
+	url = https://github.com/sylvesternumski/verthash-pospace.git
