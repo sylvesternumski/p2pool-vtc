@@ -6,12 +6,13 @@ from twisted.internet import defer
 import p2pool
 from p2pool.bitcoin import data as bitcoin_data
 from p2pool.util import deferral, jsonrpc
+txlookup = {}
 
 @deferral.retry('Error while checking Bitcoin connection:', 1)
 @defer.inlineCallbacks
-def check(bitcoind, net):
+def check(bitcoind, net, args):
     if not (yield net.PARENT.RPC_CHECK(bitcoind)):
-        print >>sys.stderr, "    Check failed! Make sure that you're connected to the right bitcoind with --bitcoind-rpc-port!"
+        print >>sys.stderr, "    Check failed! Make sure that you're connected to the right bitcoind with --bitcoind-rpc-port, and that it has finished syncing!"
         raise deferral.RetrySilentlyException()
     
     version_check_result = net.VERSION_CHECK((yield bitcoind.rpc_getnetworkinfo())['version'])
@@ -23,20 +24,31 @@ def check(bitcoind, net):
     
     try:
         blockchaininfo = yield bitcoind.rpc_getblockchaininfo()
-        softforks_supported = set(item['id'] for item in blockchaininfo.get('softforks', []))
+        try:
+            softforks_supported = set(item['id'] for item in blockchaininfo.get('softforks', [])) # not working with 0.19.0.1
+        except TypeError:
+            softforks_supported = set(item for item in blockchaininfo.get('softforks', [])) # fix for https://github.com/jtoomim/p2pool/issues/38
         try:
             softforks_supported |= set(item['id'] for item in blockchaininfo.get('bip9_softforks', []))
         except TypeError: # https://github.com/bitcoin/bitcoin/pull/7863
             softforks_supported |= set(item for item in blockchaininfo.get('bip9_softforks', []))
     except jsonrpc.Error_for_code(-32601): # Method not found
         softforks_supported = set()
-    if getattr(net, 'SOFTFORKS_REQUIRED', set()) - softforks_supported:
-        print 'Coin daemon too old! Upgrade!'
-        raise deferral.RetrySilentlyException()
+    unsupported_forks = getattr(net, 'SOFTFORKS_REQUIRED', set()) - softforks_supported
+    if unsupported_forks:
+        print "You are running a coin daemon that does not support all of the "
+        print "forking features that have been activated on this blockchain."
+        print "Consequently, your node may mine invalid blocks or may mine blocks that"
+        print "are not part of the Nakamoto consensus blockchain.\n"
+        print "Missing fork features:", ', '.join(unsupported_forks)
+        if not args.allow_obsolete_bitcoind:
+            print "\nIf you know what you're doing, this error may be overridden by running p2pool"
+            print "with the '--allow-obsolete-bitcoind' command-line option.\n\n\n"
+            raise deferral.RetrySilentlyException()
 
 @deferral.retry('Error getting work from bitcoind:', 3)
 @defer.inlineCallbacks
-def getwork(bitcoind, use_getblocktemplate=False):
+def getwork(bitcoind, use_getblocktemplate=False, txidcache={}, feecache={}, feefifo=[], known_txs={}):
     def go():
         if use_getblocktemplate:
             return bitcoind.rpc_getblocktemplate(dict(mode='template', rules=['segwit']))
@@ -55,16 +67,66 @@ def getwork(bitcoind, use_getblocktemplate=False):
         except jsonrpc.Error_for_code(-32601): # Method not found
             print >>sys.stderr, 'Error: Bitcoin version too old! Upgrade to v0.5 or newer!'
             raise deferral.RetrySilentlyException()
-    packed_transactions = [(x['data'] if isinstance(x, dict) else x).decode('hex') for x in work['transactions']]
+
+    if not 'start' in txidcache: # we clear it every 30 min
+        txidcache['start'] = time.time()
+
+    t0 = time.time()
+    unpacked_transactions = []
+    txhashes = []
+    cachehits = 0
+    cachemisses = 0
+    knownhits = 0
+    knownmisses = 0
+    for x in work['transactions']:
+        fee = x['fee']
+        x = x['data'] if isinstance(x, dict) else x
+        packed = None
+        if x in txidcache:
+            cachehits += 1
+            txid = (txidcache[x])
+            txhashes.append(txid)
+        else:
+            cachemisses += 1
+            packed = x.decode('hex')
+            txid = bitcoin_data.hash256(packed)
+            txidcache[x] = txid
+            txhashes.append(txid)
+        if txid in known_txs:
+            knownhits += 1
+            unpacked = known_txs[txid]
+        else:
+            knownmisses += 1
+            if not packed:
+                packed = x.decode('hex')
+            unpacked = bitcoin_data.tx_type.unpack(packed)
+        unpacked_transactions.append(unpacked)
+        # The only place where we can get information on transaction fees is in GBT results, so we need to store those
+        # for a while so we can spot shares that miscalculate the block reward
+        if not txid in feecache:
+            feecache[txid] = fee
+            feefifo.append(txid)
+
+    if time.time() - txidcache['start'] > 30*60.:
+        keepers = {(x['data'] if isinstance(x, dict) else x):txid for x, txid in zip(work['transactions'], txhashes)}
+        txidcache.clear()
+        txidcache.update(keepers)
+        # limit the fee cache to 100,000 entries, which should be about 10-20 MB
+        fum = 100000
+        while len(feefifo) > fum:
+            del feecache[feefifo.pop(0)]
     if 'height' not in work:
         work['height'] = (yield bitcoind.rpc_getblock(work['previousblockhash']))['height'] + 1
     elif p2pool.DEBUG:
         assert work['height'] == (yield bitcoind.rpc_getblock(work['previousblockhash']))['height'] + 1
+
+    t1 = time.time()
+    if p2pool.BENCH: print "%8.3f ms for helper.py:getwork(). Cache: %i hits %i misses, %i known_tx %i unknown %i cached" % ((t1 - t0)*1000., cachehits, cachemisses, knownhits, knownmisses, len(txidcache))
     defer.returnValue(dict(
         version=work['version'],
         previous_block=int(work['previousblockhash'], 16),
-        transactions=map(bitcoin_data.tx_type.unpack, packed_transactions),
-        transaction_hashes=map(bitcoin_data.hash256, packed_transactions),
+        transactions=unpacked_transactions,
+        transaction_hashes=txhashes,
         transaction_fees=[x.get('fee', None) if isinstance(x, dict) else None for x in work['transactions']],
         subsidy=work['coinbasevalue'],
         time=work['time'] if 'time' in work else work['curtime'],
@@ -102,14 +164,15 @@ def submit_block_rpc(block, ignore_failure, bitcoind, bitcoind_work, net):
     if (not success and success_expected and not ignore_failure) or (success and not success_expected):
         print >>sys.stderr, 'Block submittal result: %s (%r) Expected: %s' % (success, result, success_expected)
 
-def submit_block(block, ignore_failure, factory, bitcoind, bitcoind_work, net):
-    submit_block_p2p(block, factory, net)
-    submit_block_rpc(block, ignore_failure, bitcoind, bitcoind_work, net)
+def submit_block(block, ignore_failure, node):
+    submit_block_p2p(block, node.factory, node.net)
+    submit_block_rpc(block, ignore_failure, node.bitcoind, node.bitcoind_work,
+                     node.net)
 
 @defer.inlineCallbacks
-def check_genesis_block(bitcoind, genesis_block_hash):
+def check_block_header(bitcoind, block_hash):
     try:
-        yield bitcoind.rpc_getblock(genesis_block_hash)
+        yield bitcoind.rpc_getblockheader(block_hash)
     except jsonrpc.Error_for_code(-5):
         defer.returnValue(False)
     else:
