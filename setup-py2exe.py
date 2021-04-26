@@ -50,7 +50,7 @@ try:
         options=dict(py2exe=dict(
             bundle_files=bundle,
             dll_excludes=['w9xpopen.exe', "mswsock.dll", "MSWSOCK.dll"],
-            includes=['twisted.web.resource', 'ltc_scrypt', 'lyra2re2_hash', 'lyra2re3_hash', 'verthash'] + extra_includes,
+            includes=['twisted.web.resource', 'verthash'] + extra_includes,
         )),
         zipfile=None,
     )
